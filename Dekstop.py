@@ -5,6 +5,7 @@ import os
 import numpy as np
 import csv
 import datetime
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
@@ -13,7 +14,13 @@ ENCODINGS_FILE = "encodings.pickle"
 DATASET_DIR = "dataset"
 ATTENDANCE_FILE = "attendance.csv"
 CAPTURE_COUNT = 5
-ATTENDANCE_INTERVAL = 7200  # 2 hours in seconds
+
+
+# Tentukan jadwal absen (ubah sesuai kebutuhan)
+ATTENDANCE_SLOTS = [
+    (5, 9),  # Masuk: 05:00 - 09:00
+    (15, 21) # Pulang: 13:00 - 21:00
+]
 
 # Ensure required directories and files exist
 if not os.path.exists(DATASET_DIR):
@@ -39,37 +46,60 @@ def register_user():
     if not user_id or not name:
         log("ID dan Nama harus diisi!")
         return
+
     user_folder = os.path.join(DATASET_DIR, user_id)
     if not os.path.exists(user_folder):
         os.makedirs(user_folder)
+
     captured_faces = []
     count = 0
     log(f"Memulai registrasi untuk: {name} ({user_id})")
-    while count < CAPTURE_COUNT:
+
+    def capture_frame():
+        nonlocal count  # Agar bisa mengakses count dari luar fungsi ini
+        if count >= CAPTURE_COUNT:
+            save_encodings()  # Simpan hasil jika sudah selesai
+            return
+
         ret, frame = cap.read()
         if not ret:
             log("Gagal menangkap frame dari kamera!")
-            break
+            return
+
         img_path = os.path.join(user_folder, f"{name}_{count+1}.jpg")
         cv2.imwrite(img_path, frame)
+
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         face_locations = face_recognition.face_locations(rgb_frame)
         face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+
         if face_encodings:
             face_encoding = face_encodings[0]
             if is_face_registered(face_encoding):
                 log("Wajah sudah terdaftar! Registrasi dibatalkan.")
                 os.remove(img_path)
                 return
+
             captured_faces.append(face_encoding)
             count += 1
-    if captured_faces:
-        data["encodings"].extend(captured_faces)
-        data["names"].extend([name] * len(captured_faces))
-        data["ids"].extend([user_id] * len(captured_faces))
-        with open(ENCODINGS_FILE, "wb") as f:
-            pickle.dump(data, f)
-        log(f"{count} gambar wajah {name} berhasil disimpan!")
+            log(f"Capture {count}/{CAPTURE_COUNT} berhasil.")
+
+        # Panggil lagi setelah 2000ms (2 detik)
+        root.after(2000, capture_frame)
+
+    def save_encodings():
+        if captured_faces:
+            data["encodings"].extend(captured_faces)
+            data["names"].extend([name] * len(captured_faces))
+            data["ids"].extend([user_id] * len(captured_faces))
+
+            with open(ENCODINGS_FILE, "wb") as f:
+                pickle.dump(data, f)
+
+            log(f"{count} gambar wajah {name} berhasil disimpan.")
+
+    # Mulai proses capture pertama
+    capture_frame()
 
 def delete_user():
     user_id = id_entry.get().strip()
@@ -94,16 +124,38 @@ def delete_user():
     else:
         log("User tidak ditemukan!")
 
+def is_within_attendance_slot():
+    """Cek apakah waktu sekarang berada dalam salah satu jadwal absen"""
+    now = datetime.datetime.now()
+    current_hour = now.hour
+    for start, end in ATTENDANCE_SLOTS:
+        if start <= current_hour < end:
+            return True
+    return False
+
 def mark_attendance(user_id, name):
     now = datetime.datetime.now()
-    if user_id in last_attendance and (now - last_attendance[user_id]).total_seconds() < ATTENDANCE_INTERVAL:
-        log(f"{name} ({user_id}) sudah absen dalam 2 jam terakhir!")
+
+    if not is_within_attendance_slot():
+        log(f"Absen ditolak! Sekarang bukan waktu absen yang ditentukan.")
         return
+
+    if user_id in last_attendance:
+        last_time = last_attendance[user_id]
+        last_hour = last_time.hour
+
+        # Cek apakah user sudah absen dalam sesi yang sama
+        for start, end in ATTENDANCE_SLOTS:
+            if start <= last_hour < end and start <= now.hour < end:
+                log(f"{name} ({user_id}) sudah absen di sesi ini!")
+                return
+
+    # Simpan absen
     last_attendance[user_id] = now
     with open(ATTENDANCE_FILE, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([user_id, name, now.strftime("%Y-%m-%d %H:%M:%S")])
-    log(f"Kehadiran dicatat: {name} ({user_id})")
+    log(f"Kehadiran dicatat: {name} ({user_id}) pada {now.strftime('%H:%M:%S')}")
 
 def recognize_faces():
     ret, frame = cap.read()
@@ -140,26 +192,83 @@ root.title("Face Recognition System")
 root.geometry(f"{root.winfo_screenwidth()}x{root.winfo_screenheight()}")
 root.configure(bg="#333")
 
-video_label = tk.Label(root)
-video_label.pack(pady=10)
-log_box = tk.Text(root, height=10, width=80, bg="#222", fg="white")
+main_frame = tk.Frame(root, bg="#333")
+main_frame.pack(fill=tk.BOTH, expand=True)
+
+# Load dan resize logo
+image = Image.open("images\BPKP_Logo.png")  # Ganti dengan path file logo
+image = image.resize((141, 57))  # Ubah ukuran logo sesuai kebutuhan
+logo_image = ImageTk.PhotoImage(image)
+
+# Tambahkan logo ke dalam UI
+logo_label = tk.Label(root, image=logo_image, bg="#333")
+logo_label.pack(pady=10)  # Jarak antara logo dan header
+
+# Frame Header
+header_frame = tk.Frame(root, bg="#333")
+header_frame.pack(fill=tk.X)
+
+header_label = tk.Label(
+    header_frame,
+    text="VISAGIUM : FACE RECOGNITION ATTENDANCE SYSTEM",
+    fg="white",
+    bg="#333",
+    font=("Arial", 16, "bold")
+)
+header_label.pack(pady=10)
+
+# Frame Utama
+main_frame = tk.Frame(root, bg="#444")
+main_frame.pack(fill=tk.BOTH, expand=True)
+
+# Frame Kiri (Video Feed)
+left_frame = tk.Frame(main_frame, bg="#333")
+left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+video_label = tk.Label(left_frame)
+video_label.pack()
+log_box = tk.Text(left_frame, height=10, width=80, bg="#222", fg="white")
 log_box.pack(pady=10)
 
-frame = tk.Frame(root, bg="#333")
-frame.pack()
-tk.Label(frame, text="ID:", fg="white", bg="#333").grid(row=0, column=0)
-id_entry = tk.Entry(frame)
-id_entry.grid(row=0, column=1)
-tk.Label(frame, text="Nama:", fg="white", bg="#333").grid(row=1, column=0)
-name_entry = tk.Entry(frame)
-name_entry.grid(row=1, column=1)
+# Frame Kanan (Form Input) - Gunakan pack()
+right_frame = tk.Frame(main_frame, bg="#333")
+right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-register_button = tk.Button(frame, text="Register", command=register_user, bg="#4CAF50", fg="white")
-register_button.grid(row=2, column=0, pady=10)
-delete_button = tk.Button(frame, text="Delete", command=delete_user, bg="#f44336", fg="white")
-delete_button.grid(row=2, column=1, pady=10)
-attendance_button = tk.Button(frame, text="Attendance", command=recognize_faces, bg="#4CAF50", fg="white")
-attendance_button.grid(row=2, column=2, pady=10)
+# Sub-frame agar konten lebih mudah diatur
+form_frame = tk.Frame(right_frame, bg="#333")
+form_frame.pack(expand=True)  # Ini membuat form ada di tengah
+
+# Form Input
+tk.Label(form_frame, text="ID:", fg="white", bg="#333").pack(pady=10)
+id_entry = tk.Entry(form_frame, width=30)
+id_entry.pack(pady=5)
+
+tk.Label(form_frame, text="Nama:", fg="white", bg="#333").pack(pady=10)
+name_entry = tk.Entry(form_frame, width=30)
+name_entry.pack(pady=5)
+
+# Membuat tombol ukuran sama & vertikal
+button_width = 20  
+button_height = 2  
+
+register_button = tk.Button(
+    form_frame, text="Register", command=register_user,
+    bg="#4CAF50", fg="white", width=button_width, height=button_height
+)
+register_button.pack(pady=5, fill=tk.X)
+
+delete_button = tk.Button(
+    form_frame, text="Delete", command=delete_user,
+    bg="#f44336", fg="white", width=button_width, height=button_height
+)
+delete_button.pack(pady=5, fill=tk.X)
+
+attendance_button = tk.Button(
+    form_frame, text="Attendance", command=recognize_faces,
+    bg="#4CAF50", fg="white", width=button_width, height=button_height
+)
+attendance_button.pack(pady=5, fill=tk.X)
+
 
 cap = cv2.VideoCapture(0)
 update_frame()
