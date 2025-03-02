@@ -6,6 +6,7 @@ import numpy as np
 import csv
 import datetime
 import time
+import concurrent.futures
 import tkinter as tk
 from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
@@ -18,7 +19,7 @@ CAPTURE_COUNT = 5
 
 # Tentukan jadwal absen (ubah sesuai kebutuhan)
 ATTENDANCE_SLOTS = [
-    (5, 9),  # Masuk: 05:00 - 09:00
+    (5, 12),  # Masuk: 05:00 - 12:00
     (15, 21) # Pulang: 13:00 - 21:00
 ]
 
@@ -177,15 +178,46 @@ def log(message):
     log_box.insert(tk.END, message + "\n")
     log_box.see(tk.END)
 
+def process_face(frame):
+    """ Fungsi untuk melakukan deteksi wajah di thread terpisah """
+    face_locations = face_recognition.face_locations(frame)
+    encodings = face_recognition.face_encodings(frame, face_locations)
+    return face_locations, encodings
+
 def update_frame():
     ret, frame = cap.read()
     if ret:
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(frame)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Ubah ke RGB untuk face_recognition
+
+        # Gunakan Threading agar face encoding tidak menghambat loop utama
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(process_face, frame_rgb)
+            face_locations, face_encodings = future.result()
+
+        for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+            matches = face_recognition.compare_faces(data["encodings"], face_encoding)
+            name = "Unknown"
+            user_id = ""
+
+            if True in matches:
+                matched_idx = matches.index(True)
+                user_id = data["ids"][matched_idx]
+                name = data["names"][matched_idx]
+
+            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            label = f"{name} ({user_id})"
+            cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Konversi ke RGB untuk ditampilkan di GUI
+
+        # Tampilkan di GUI
+        img = Image.fromarray(frame_rgb)
         img = ImageTk.PhotoImage(img)
         video_label.img = img
         video_label.config(image=img)
+
     video_label.after(10, update_frame)
+
 
 root = tk.Tk()
 root.title("Face Recognition System")
@@ -271,6 +303,9 @@ attendance_button.pack(pady=5, fill=tk.X)
 
 
 cap = cv2.VideoCapture(0)
+# Mengatur resolusi video agar lebih ringan
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 update_frame()
 
 root.mainloop()
