@@ -14,41 +14,18 @@ import shutil
 from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
 
+
 ENCODINGS_FILE = "encodings.pickle"
 DATASET_DIR = "dataset"
 ATTENDANCE_FILE = "attendance.csv"
 CAPTURE_COUNT = 5
-API_ATTENDANCE_URL = "https://private-c0cbeb-visagium.apiary-mock.com/Attendance"
-API_EMPLOYEE = "https://private-c0cbeb-visagium.apiary-mock.com/Employee"
-
-
-def send_attendance_to_api(user_id, name, timestamp):
-    """ Mengirim data ke API dan hanya menyimpan lokal jika berhasil """
-    try:
-        payload = {
-            "employee_id": int(user_id),  # Pastikan sebagai integer
-            "name": name,
-            "timestamp": timestamp
-        }
-        headers = {"Content-Type": "application/json"}
-
-        response = requests.post(API_ATTENDANCE_URL, data=json.dumps(payload), headers=headers)
-
-        if response.status_code == 200:
-            log(f"✅ Kehadiran {name} ({user_id}) berhasil dikirim ke API!")
-            return True
-        else:
-            log(f"⚠️ Gagal mengirim ke API! Status: {response.status_code}")
-            return False
-
-    except Exception as e:
-        log(f"❌ Error saat mengirim ke API: {e}")
-        return False
+API_ATTENDANCE_URL = "https://visagium-api.onrender.com/Attendance"
+API_EMPLOYEE = "https://visagium-api.onrender.com/Employee"
 
 # Tentukan jadwal absen (ubah sesuai kebutuhan)
 ATTENDANCE_SLOTS = [
     (5, 12),  # Masuk: 05:00 - 12:00
-    (15, 21) # Pulang: 13:00 - 21:00
+    (15, 23) # Pulang: 13:00 - 21:00
 ]
 
 # Ensure required directories and files exist
@@ -67,7 +44,19 @@ if not os.path.exists(ATTENDANCE_FILE):
 last_attendance = {}
 
 def is_face_registered(face_encoding):
-    return any(face_recognition.compare_faces(data["encodings"], face_encoding))
+    """Cek apakah wajah sudah terdaftar berdasarkan jarak encoding"""
+    if not data["encodings"]:  # Jika database kosong, langsung return False
+        return False  
+
+    distances = face_recognition.face_distance(data["encodings"], face_encoding)
+    min_distance = min(distances)
+
+    # Gunakan threshold yang lebih ketat (0.4 - 0.5) untuk menghindari false positive
+    if min_distance < 0.45:
+        log(f"Wajah terdeteksi sudah terdaftar dengan jarak {min_distance:.2f}")
+        return True  
+    return False  
+
 
 def register_user():
     user_id = id_entry.get().strip()
@@ -85,9 +74,9 @@ def register_user():
     log(f"Memulai registrasi untuk: {name} ({user_id})")
 
     def capture_frame():
-        nonlocal count  # Agar bisa mengakses count dari luar fungsi ini
+        nonlocal count
         if count >= CAPTURE_COUNT:
-            save_encodings()  # Simpan hasil jika sudah selesai
+            save_encodings()
             return
 
         ret, frame = cap.read()
@@ -104,8 +93,10 @@ def register_user():
 
         if face_encodings:
             face_encoding = face_encodings[0]
+
+            # 🔍 Cek apakah wajah sudah ada dengan metode baru
             if is_face_registered(face_encoding):
-                log("Wajah sudah terdaftar! Registrasi dibatalkan.")
+                log("⚠️ Wajah sudah terdaftar! Registrasi dibatalkan.")
                 os.remove(img_path)
                 return
 
@@ -113,15 +104,13 @@ def register_user():
             count += 1
             log(f"Capture {count}/{CAPTURE_COUNT} berhasil.")
 
-        # Panggil lagi setelah 2000ms (2 detik)
         root.after(2000, capture_frame)
 
     def save_encodings():
         if captured_faces:
-            # 🔹 Kirim data ke API Apiary terlebih dahulu sebelum menyimpan lokal
             try:
                 payload = {
-                    "employee_id": int(user_id),  # Pastikan dikirim sebagai integer
+                    "employee_id": int(user_id),
                     "name": name
                 }
                 headers = {"Content-Type": "application/json"}
@@ -132,17 +121,15 @@ def register_user():
                     log(f"Registrasi {name} berhasil dikirim ke API! ✅")
                 else:
                     log(f"⚠️ Gagal mengirim data ke API! Status: {response.status_code}")
-                    raise Exception("Gagal mengirim ke API")  # Lempar error untuk rollback
+                    raise Exception("Gagal mengirim ke API")
                 
             except Exception as e:
                 log(f"❌ Registrasi dibatalkan! Error API: {e}")
-                # 🔥 Hapus folder user jika registrasi gagal
                 if os.path.exists(user_folder):
                     shutil.rmtree(user_folder)
                     log("Folder user dihapus untuk menghindari data yang tidak valid.")
-                return  # Stop eksekusi jika API gagal
+                return
 
-            # Jika API berhasil, lanjutkan menyimpan data lokal
             data["encodings"].extend(captured_faces)
             data["names"].extend([name] * len(captured_faces))
             data["ids"].extend([user_id] * len(captured_faces))
@@ -151,7 +138,7 @@ def register_user():
                 pickle.dump(data, f)
 
             log(f"{count} gambar wajah {name} berhasil disimpan.")
-    # Mulai proses capture pertama
+
     capture_frame()
 
 def delete_user():
@@ -202,6 +189,42 @@ def is_within_attendance_slot():
             return True
     return False
 
+def load_attendance_history():
+    """Memuat riwayat kehadiran dari file agar tidak hilang saat restart."""
+    if not os.path.exists(ATTENDANCE_FILE):
+        return
+
+    with open(ATTENDANCE_FILE, "r") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) < 3:
+                continue  # Lewati data yang tidak valid
+            user_id, name, timestamp = row
+            last_attendance[user_id] = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+
+def send_attendance_to_api(user_id, name, timestamp):
+    """ Mengirim data ke API dan hanya menyimpan lokal jika berhasil """
+    try:
+        payload = {
+            "employee_id": int(user_id),  # Pastikan sebagai integer
+            "name": name,
+            "timestamp": timestamp
+        }
+        headers = {"Content-Type": "application/json"}
+
+        response = requests.post(API_ATTENDANCE_URL, data=json.dumps(payload), headers=headers)
+
+        if response.status_code == 200:
+            log(f"✅ Kehadiran {name} ({user_id}) berhasil dikirim ke API!")
+            return True
+        else:
+            log(f"⚠️ Gagal mengirim ke API! Status: {response.status_code}")
+            return False
+
+    except Exception as e:
+        log(f"❌ Error saat mengirim ke API: {e}")
+        return False
+
 def mark_attendance(user_id, name):
     """ Mencatat kehadiran hanya jika API berhasil menerima data """
     now = datetime.datetime.now()
@@ -233,64 +256,83 @@ def mark_attendance(user_id, name):
     else:
         log(f"❌ Kehadiran gagal dicatat karena API tidak merespons!")
 
+
+# Panggil fungsi ini saat aplikasi dimulai
+load_attendance_history()
+
 def recognize_faces():
+    """ Deteksi wajah dan pencocokan dengan data yang telah disimpan """
     ret, frame = cap.read()
     if not ret:
         return
+    
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     face_locations = face_recognition.face_locations(rgb_frame)
     face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+
     for face_encoding in face_encodings:
-        matches = face_recognition.compare_faces(data["encodings"], face_encoding)
-        if True in matches:
-            matched_idx = matches.index(True)
-            user_id = data["ids"][matched_idx]
-            name = data["names"][matched_idx]
+        face_distances = face_recognition.face_distance(data["encodings"], face_encoding)
+        if face_distances.size == 0:
+            continue
+        
+        best_match_index = np.argmin(face_distances)
+        if face_recognition.compare_faces([data["encodings"][best_match_index]], face_encoding, tolerance=0.4)[0]:
+            user_id = data["ids"][best_match_index]
+            name = data["names"][best_match_index]
             mark_attendance(user_id, name)
+
     root.after(1000, recognize_faces)
 
+
 def log(message):
+    """ Menampilkan log secara efisien tanpa menghambat UI """
     log_box.insert(tk.END, message + "\n")
     log_box.see(tk.END)
+    root.after_idle(log_box.update_idletasks)
+
 
 def process_face(frame):
-    """ Fungsi untuk melakukan deteksi wajah di thread terpisah """
+    """ Deteksi wajah pada thread terpisah untuk meningkatkan performa """
+    if frame is None or frame.size == 0:
+        return [], []
+    
     face_locations = face_recognition.face_locations(frame)
-    encodings = face_recognition.face_encodings(frame, face_locations)
-    return face_locations, encodings
+    return face_locations, face_recognition.face_encodings(frame, face_locations)
+
 
 def update_frame():
+    """ Mengupdate frame video dan menampilkan hasil deteksi wajah """
     ret, frame = cap.read()
-    if ret:
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Ubah ke RGB untuk face_recognition
+    if not ret:
+        video_label.after(10, update_frame)
+        return
 
-        # Gunakan Threading agar face encoding tidak menghambat loop utama
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(process_face, frame_rgb)
-            face_locations, face_encodings = future.result()
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-            matches = face_recognition.compare_faces(data["encodings"], face_encoding)
-            name = "Unknown"
-            user_id = ""
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(process_face, frame_rgb)
+        face_locations, face_encodings = future.result()
 
-            if True in matches:
-                matched_idx = matches.index(True)
-                user_id = data["ids"][matched_idx]
-                name = data["names"][matched_idx]
+    for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+        face_distances = face_recognition.face_distance(data["encodings"], face_encoding)
+        if face_distances.size == 0:
+            continue
 
-            first_name = name.split()[0]  # Ambil hanya nama depan
-            label = f"{first_name} ({user_id})"
-            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-            cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        best_match_index = np.argmin(face_distances)
+        if face_recognition.compare_faces([data["encodings"][best_match_index]], face_encoding, tolerance=0.5)[0]:
+            user_id = data["ids"][best_match_index]
+            name = data["names"][best_match_index]
+        else:
+            user_id, name = "", "Unknown"
 
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Konversi ke RGB untuk ditampilkan di GUI
+        label = f"{name.split()[0]} ({user_id})"  # Hanya tampilkan nama depan
+        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+        cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-        # Tampilkan di GUI
-        img = Image.fromarray(frame_rgb)
-        img = ImageTk.PhotoImage(img)
-        video_label.img = img
-        video_label.config(image=img)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    img = ImageTk.PhotoImage(Image.fromarray(frame_rgb))
+    video_label.img = img
+    video_label.config(image=img)
 
     video_label.after(10, update_frame)
 
@@ -379,9 +421,6 @@ attendance_button.pack(pady=5, fill=tk.X)
 
 
 cap = cv2.VideoCapture(0)
-# Mengatur resolusi video agar lebih ringan
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 update_frame()
 
 root.mainloop()
