@@ -8,6 +8,9 @@ import datetime
 import time
 import concurrent.futures
 import tkinter as tk
+import requests
+import json
+import shutil
 from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
 
@@ -15,7 +18,32 @@ ENCODINGS_FILE = "encodings.pickle"
 DATASET_DIR = "dataset"
 ATTENDANCE_FILE = "attendance.csv"
 CAPTURE_COUNT = 5
+API_ATTENDANCE_URL = "https://private-c0cbeb-visagium.apiary-mock.com/Attendance"
+API_EMPLOYEE = "https://private-c0cbeb-visagium.apiary-mock.com/Employee"
 
+
+def send_attendance_to_api(user_id, name, timestamp):
+    """ Mengirim data ke API dan hanya menyimpan lokal jika berhasil """
+    try:
+        payload = {
+            "employee_id": int(user_id),  # Pastikan sebagai integer
+            "name": name,
+            "timestamp": timestamp
+        }
+        headers = {"Content-Type": "application/json"}
+
+        response = requests.post(API_ATTENDANCE_URL, data=json.dumps(payload), headers=headers)
+
+        if response.status_code == 200:
+            log(f"✅ Kehadiran {name} ({user_id}) berhasil dikirim ke API!")
+            return True
+        else:
+            log(f"⚠️ Gagal mengirim ke API! Status: {response.status_code}")
+            return False
+
+    except Exception as e:
+        log(f"❌ Error saat mengirim ke API: {e}")
+        return False
 
 # Tentukan jadwal absen (ubah sesuai kebutuhan)
 ATTENDANCE_SLOTS = [
@@ -90,6 +118,31 @@ def register_user():
 
     def save_encodings():
         if captured_faces:
+            # 🔹 Kirim data ke API Apiary terlebih dahulu sebelum menyimpan lokal
+            try:
+                payload = {
+                    "employee_id": int(user_id),  # Pastikan dikirim sebagai integer
+                    "name": name
+                }
+                headers = {"Content-Type": "application/json"}
+                
+                response = requests.post(API_EMPLOYEE, data=json.dumps(payload), headers=headers)
+                
+                if response.status_code == 200:
+                    log(f"Registrasi {name} berhasil dikirim ke API! ✅")
+                else:
+                    log(f"⚠️ Gagal mengirim data ke API! Status: {response.status_code}")
+                    raise Exception("Gagal mengirim ke API")  # Lempar error untuk rollback
+                
+            except Exception as e:
+                log(f"❌ Registrasi dibatalkan! Error API: {e}")
+                # 🔥 Hapus folder user jika registrasi gagal
+                if os.path.exists(user_folder):
+                    shutil.rmtree(user_folder)
+                    log("Folder user dihapus untuk menghindari data yang tidak valid.")
+                return  # Stop eksekusi jika API gagal
+
+            # Jika API berhasil, lanjutkan menyimpan data lokal
             data["encodings"].extend(captured_faces)
             data["names"].extend([name] * len(captured_faces))
             data["ids"].extend([user_id] * len(captured_faces))
@@ -98,30 +151,45 @@ def register_user():
                 pickle.dump(data, f)
 
             log(f"{count} gambar wajah {name} berhasil disimpan.")
-
     # Mulai proses capture pertama
     capture_frame()
 
 def delete_user():
     user_id = id_entry.get().strip()
     name = name_entry.get().strip()
+
     if not user_id or not name:
         log("ID dan Nama harus diisi!")
         return
+
     if user_id in data["ids"] and name in data["names"]:
-        indices = [i for i, x in enumerate(data["ids"]) if x == user_id]
-        for i in reversed(indices):
-            del data["encodings"][i]
-            del data["names"][i]
-            del data["ids"][i]
-        with open(ENCODINGS_FILE, "wb") as f:
-            pickle.dump(data, f)
-        user_folder = os.path.join(DATASET_DIR, user_id)
-        if os.path.exists(user_folder):
-            for file in os.listdir(user_folder):
-                os.remove(os.path.join(user_folder, file))
-            os.rmdir(user_folder)
-        log(f"Data {name} ({user_id}) berhasil dihapus!")
+        # Kirim permintaan DELETE ke API
+        response = requests.delete(API_EMPLOYEE, json={"employee_id": int(user_id)})
+
+        if response.status_code == 200:  # Pastikan API berhasil menghapus
+            log(f"⚠️ User {name} ({user_id}) berhasil dihapus dari database!")
+
+            # Hapus dari data lokal setelah sukses dari API
+            indices = [i for i, x in enumerate(data["ids"]) if x == user_id]
+            for i in reversed(indices):
+                del data["encodings"][i]
+                del data["names"][i]
+                del data["ids"][i]
+
+            with open(ENCODINGS_FILE, "wb") as f:
+                pickle.dump(data, f)
+
+            # Hapus folder dataset user
+            user_folder = os.path.join(DATASET_DIR, user_id)
+            if os.path.exists(user_folder):
+                for file in os.listdir(user_folder):
+                    os.remove(os.path.join(user_folder, file))
+                os.rmdir(user_folder)
+
+            log(f"⚠️ Data {name} ({user_id}) berhasil dihapus secara lokal!")
+        else:
+            log(f"❌ Gagal menghapus user {name} ({user_id}) dari database! Error: {response.status_code}")
+
     else:
         log("User tidak ditemukan!")
 
@@ -135,28 +203,35 @@ def is_within_attendance_slot():
     return False
 
 def mark_attendance(user_id, name):
+    """ Mencatat kehadiran hanya jika API berhasil menerima data """
     now = datetime.datetime.now()
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
 
     if not is_within_attendance_slot():
-        log(f"Absen ditolak! Sekarang bukan waktu absen yang ditentukan.")
+        log(f"⏳ Absen ditolak! Sekarang bukan waktu absen yang ditentukan.")
         return
 
     if user_id in last_attendance:
         last_time = last_attendance[user_id]
         last_hour = last_time.hour
 
-        # Cek apakah user sudah absen dalam sesi yang sama
         for start, end in ATTENDANCE_SLOTS:
             if start <= last_hour < end and start <= now.hour < end:
-                log(f"{name} ({user_id}) sudah absen di sesi ini!")
+                log(f"⚠️ {name} ({user_id}) sudah absen di sesi ini!")
                 return
 
-    # Simpan absen
-    last_attendance[user_id] = now
-    with open(ATTENDANCE_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([user_id, name, now.strftime("%Y-%m-%d %H:%M:%S")])
-    log(f"Kehadiran dicatat: {name} ({user_id}) pada {now.strftime('%H:%M:%S')}")
+    # 🔹 Kirim ke API dulu
+    if send_attendance_to_api(user_id, name, timestamp):
+        # Jika sukses, lanjutkan menyimpan ke lokal
+        last_attendance[user_id] = now
+
+        with open(ATTENDANCE_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([user_id, name, timestamp])
+
+        log(f"✅ Kehadiran dicatat & disimpan lokal: {name} ({user_id}) pada {timestamp}")
+    else:
+        log(f"❌ Kehadiran gagal dicatat karena API tidak merespons!")
 
 def recognize_faces():
     ret, frame = cap.read()
@@ -204,8 +279,9 @@ def update_frame():
                 user_id = data["ids"][matched_idx]
                 name = data["names"][matched_idx]
 
+            first_name = name.split()[0]  # Ambil hanya nama depan
+            label = f"{first_name} ({user_id})"
             cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-            label = f"{name} ({user_id})"
             cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Konversi ke RGB untuk ditampilkan di GUI
