@@ -25,7 +25,7 @@ API_EMPLOYEE = "https://visagium-api.onrender.com/Employee"
 # Tentukan jadwal absen (ubah sesuai kebutuhan)
 ATTENDANCE_SLOTS = [
     (5, 12),  # Masuk: 05:00 - 12:00
-    (15, 23) # Pulang: 13:00 - 21:00
+    (15, 23) # Pulang: 13:00 - 23:00
 ]
 
 # Ensure required directories and files exist
@@ -196,11 +196,19 @@ def load_attendance_history():
 
     with open(ATTENDANCE_FILE, "r") as f:
         reader = csv.reader(f)
+        next(reader, None)  # Lewati baris pertama jika berisi header
+        
         for row in reader:
             if len(row) < 3:
                 continue  # Lewati data yang tidak valid
+                
             user_id, name, timestamp = row
-            last_attendance[user_id] = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+            
+            try:
+                last_attendance[user_id] = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                print(f"Format tanggal tidak valid pada baris: {row}")
+
 
 def send_attendance_to_api(user_id, name, timestamp):
     """ Mengirim data ke API dan hanya menyimpan lokal jika berhasil """
@@ -346,7 +354,7 @@ main_frame = tk.Frame(root, bg="#333")
 main_frame.pack(fill=tk.BOTH, expand=True)
 
 # Load dan resize logo
-image = Image.open("images\BPKP_Logo.png")  # Ganti dengan path file logo
+image = Image.open(r"images\BPKP_Logo.png")  # Ganti dengan path file logo
 image = image.resize((141, 57))  # Ubah ukuran logo sesuai kebutuhan
 logo_image = ImageTk.PhotoImage(image)
 

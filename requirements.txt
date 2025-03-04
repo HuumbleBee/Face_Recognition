@@ -1,6 +1,10 @@
 opencv-python
-numpy
-dlib
 face-recognition
-flask
-pandas
+numpy
+pillow
+requests
+tk
+concurrent.futures
+datetime
+shutil
+csv
