@@ -30,7 +30,7 @@ This project is a **Face Recognition-based Attendance System** that uses OpenCV 
 ## Installation
 1. Clone this repository:
    ```sh
-   git clone https://github.com/your-username/face-recognition-attendance.git
+   git clone https://github.com/HuumbleBee/Face_Recognition.git
    cd face-recognition-attendance
    ```
 2. Install dependencies:
